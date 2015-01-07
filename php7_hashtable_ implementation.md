@@ -179,3 +179,4 @@ typedef struct _Bucket {
 从上面结构的对比可以看出，新的 **_Bucket** 只是一个单纯存储key以及value的结构了，而不承担以前的hash链表以及hash冲突链表的构建工作了。新的**HashTable**中，hash链表的构建工作由 **HashTable->arHash** 来承担，而解决hash冲突的链表则被放到了**_zval_struct**了。在新的实现当中，**HashTable->arHash[]** 会指向冲突链表的头，然后利用 **_zval_struct.u2.next** 来指向冲突链表中的下一个Bucket对应的 **arHash** 的位置。这样，现在的冲突链表俨然由原来的双向链表变成了现在的单向链表了。当新的冲突产生的时候，会将新的 **Bucket** 放入这个冲突链表的头部，然后让这个链表所对应的 **arHash** 的位置重新指向它，然后它的 **_zval_struct.u2.next**  指向原来的冲突链表头元素。就这样就构建好了一个冲突链表。
 
 ![新的HashTable结构图](http://wenjunblog-images.stor.sinaapp.com/original/172597d72309ff4d05a3be933e82bc30.jpg)
+
