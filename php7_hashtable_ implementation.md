@@ -127,7 +127,7 @@ static zend_always_inline zval *_zend_hash_add_or_update_i(HashTable *ht, zend_s
 
 add_to_hash:
 	HANDLE_BLOCK_INTERRUPTIONS();
-	idx = ht->nNumUsed++;	/* 已使用计数+1，并且用新的位置来做为索引 */
+	idx = ht->nNumUsed++;	/* 已使用计数+1，并且用老的位置来做为索引 */
 	ht->nNumOfElements++;	/* 元素个数加1 */
 	if (ht->nInternalPointer == INVALID_IDX) {
 		ht->nInternalPointer = idx;
@@ -180,3 +180,94 @@ typedef struct _Bucket {
 
 ![新的HashTable结构图](http://wenjunblog-images.stor.sinaapp.com/original/172597d72309ff4d05a3be933e82bc30.jpg)
 
+### 删除元素
+---
+Zend提供了一系列删除HashTable中元素的API，，定义如下：
+
+```
+ZEND_API int zend_hash_del(HashTable *ht, zend_string *key);
+ZEND_API int zend_hash_del_ind(HashTable *ht, zend_string *key);
+ZEND_API int zend_hash_str_del(HashTable *ht, const char *key, size_t len);
+ZEND_API int zend_hash_str_del_ind(HashTable *ht, const char *key, size_t len);
+ZEND_API int zend_hash_index_del(HashTable *ht, zend_ulong h);
+```
+
+接下来看看 **zend_hash_del** 的代码：
+
+```
+ZEND_API int zend_hash_del(HashTable *ht, zend_string *key)
+{
+	zend_ulong h;
+	uint32_t nIndex;
+	uint32_t idx;
+	Bucket *p;
+	Bucket *prev = NULL;
+
+	IS_CONSISTENT(ht);
+
+	h = zend_string_hash_val(key);		/* 根据key计算出hash值 */
+	nIndex = h & ht->nTableMask;		/* 与nTableMask按位与计算出在hashtable中的位置 */
+
+	idx = ht->arHash[nIndex];
+	while (idx != INVALID_IDX) {
+		p = ht->arData + idx;		/* 指针移位 */
+		if ((p->key == key) ||		/* 比较key值 */
+			(p->h == h &&
+		     p->key &&
+		     p->key->len == key->len &&
+		     memcmp(p->key->val, key->val, key->len) == 0)) {
+			_zend_hash_del_el_ex(ht, idx, p, prev);		/* 做实际删除动作的函数 */
+			return SUCCESS;
+		}
+		prev = p;
+		idx = Z_NEXT(p->val);	/* 遍历hash冲突链表 */
+	}
+	return FAILURE;
+}
+```
+
+上面的函数函数非常简单，就是进行hash查找，然后比较key值，最后调用函数 **_zend_hash_del_el_ex** 进行实际的删除动作，我们接下来看看 **_zend_hash_del_el_ex** d的代码实现：
+
+```
+static zend_always_inline void _zend_hash_del_el_ex(HashTable *ht, uint32_t idx, Bucket *p, Bucket *prev)
+{
+	HANDLE_BLOCK_INTERRUPTIONS();
+	if (!(ht->u.flags & HASH_FLAG_PACKED)) {	/* 非自然key序数组 */
+		if (prev) {	/* 找到的元素不在hash冲突链表的首位，将它的前一个的next指针指向它的下一个元素 */
+			Z_NEXT(prev->val) = Z_NEXT(p->val);
+		} else {	/* 找到的元素位于hash冲突链表的首位，将arHash对应的位置指向它的下一个元素 */
+			ht->arHash[p->h & ht->nTableMask] = Z_NEXT(p->val);
+		}
+	}
+	if (ht->nNumUsed - 1 == idx) {	/* 元素位于arData数组的尾部 */
+		do {
+			ht->nNumUsed--;
+		} while (ht->nNumUsed > 0 && (Z_TYPE(ht->arData[ht->nNumUsed-1].val) == IS_UNDEF));		/* 循环自减，去掉删除当前元素后遗留的尾部的UNDEF元素 */
+	}
+	ht->nNumOfElements--;	/* hash表中元素个数减1 */
+	if (ht->nInternalPointer == idx) {
+		while (1) {
+			idx++;
+			if (idx >= ht->nNumUsed) {	/* 当idx指向的元素位于hash表最后一个元素时候，重置hash遍历指针为无效指针 */
+				ht->nInternalPointer = INVALID_IDX;
+				break;
+			} else if (Z_TYPE(ht->arData[idx].val) != IS_UNDEF) {	/* 当前元素不在hash表最后，并且指向的元素是非UNDEF的，将hash遍历指针指向它 */
+				ht->nInternalPointer = idx;
+				break;
+			}
+		}
+	}
+	if (p->key) {	/* 释放key */
+		zend_string_release(p->key);
+	}
+	if (ht->pDestructor) {	/* 调用析构函数释放value的值 */
+		zval tmp;
+		ZVAL_COPY_VALUE(&tmp, &p->val);
+		ZVAL_UNDEF(&p->val);
+		ht->pDestructor(&tmp);
+	} else {
+		ZVAL_UNDEF(&p->val);
+	}
+	HANDLE_UNBLOCK_INTERRUPTIONS();
+}
+```
