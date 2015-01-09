@@ -271,3 +271,126 @@ static zend_always_inline void _zend_hash_del_el_ex(HashTable *ht, uint32_t idx,
 	HANDLE_UNBLOCK_INTERRUPTIONS();
 }
 ```
+
+有一个注意的就是上面出现了一个宏 **HASH_FLAG_PACKED** 。根据鸟个原话的解释：
+> 表示一个自然key序的数组，就是可以随机访问的数组，就好比是C语言的数
+> 
+> array(1,2,3,4)，那么$arr[2]就是ht->arData[2]
+> 
+> array(1,2,3,4) packed / array(1 => 2, 3=> 2, 2=> 1) 非packed
+
+个人理解就是自然排序(packed)就是Zend引擎自己生成的一个key，而不是程序员指定的。
+
+### 清空HashTable
+---
+
+Zend提供了一个api来清空整个HashTable **zend_hash_clean**，下面是它的实现代码：
+
+```
+ZEND_API void zend_hash_clean(HashTable *ht)
+{
+	Bucket *p, *end;
+
+	IS_CONSISTENT(ht);
+
+	if (ht->nNumUsed) {		/* 非空HashTable */
+		p = ht->arData;		/* 数组头 */
+		end = p + ht->nNumUsed;		/* 数组尾 */
+		if (ht->pDestructor) {
+			if (ht->u.flags & HASH_FLAG_PACKED) {		/* 自然key序数组 */
+				do {
+					if (EXPECTED(Z_TYPE(p->val) != IS_UNDEF)) {
+						ht->pDestructor(&p->val);
+					}
+				} while (++p != end);	/* 循环遍历，挨个调用析构函数进行销毁 */
+			} else {
+				do {
+					if (EXPECTED(Z_TYPE(p->val) != IS_UNDEF)) {
+						ht->pDestructor(&p->val);		/* 调用析构函数进行数据销毁 */
+						if (EXPECTED(p->key)) {		/* 存在key，销毁key并释放内存 */
+							zend_string_release(p->key);
+						}
+					}
+				} while (++p != end);	/* 循环遍历进行销毁 */
+			}
+		} else {
+			if (!(ht->u.flags & HASH_FLAG_PACKED)) {		/* 非自然key序数组 */
+				do {
+					if (EXPECTED(Z_TYPE(p->val) != IS_UNDEF)) {
+						if (EXPECTED(p->key)) {
+							zend_string_release(p->key);
+						}
+					}
+				} while (++p != end);	/* 循环遍历，挨个销毁key */
+			}
+		}
+		if (!(ht->u.flags & HASH_FLAG_PACKED)) {		/* 非自然key序数组，重置arHash */
+			memset(ht->arHash, INVALID_IDX, ht->nTableSize * sizeof(uint32_t));	
+		}
+	}
+	ht->nNumUsed = 0;	/* arData计数置为0 */
+	ht->nNumOfElements = 0;		/* hash表中元素个数置为0 */
+	ht->nNextFreeElement = 0;	/* 下一个空闲可用位置的数字索引置为0 */
+	ht->nInternalPointer = INVALID_IDX;	/* Hash遍历指针置为不可用 */
+}
+```
+
+### 销毁HashTable
+---
+
+**HashTable** 的销毁是由 **zend_hash_destroy** 来负责的，实现如下：
+
+```
+ZEND_API void zend_hash_destroy(HashTable *ht)
+{
+	Bucket *p, *end;
+
+	IS_CONSISTENT(ht);
+
+	if (ht->nNumUsed) {
+		p = ht->arData;
+		end = p + ht->nNumUsed;
+		if (ht->pDestructor) {
+			SET_INCONSISTENT(HT_IS_DESTROYING);
+
+			if (ht->u.flags & HASH_FLAG_PACKED) {
+				do {
+					if (EXPECTED(Z_TYPE(p->val) != IS_UNDEF)) {
+						ht->pDestructor(&p->val);
+					}
+				} while (++p != end);
+			} else {
+				do {
+					if (EXPECTED(Z_TYPE(p->val) != IS_UNDEF)) {
+						ht->pDestructor(&p->val);
+						if (EXPECTED(p->key)) {
+							zend_string_release(p->key);
+						}
+					}
+				} while (++p != end);
+			}
+		
+			SET_INCONSISTENT(HT_DESTROYED);
+		} else {
+			if (!(ht->u.flags & HASH_FLAG_PACKED)) {
+				do {
+					if (EXPECTED(Z_TYPE(p->val) != IS_UNDEF)) {
+						if (EXPECTED(p->key)) {
+							zend_string_release(p->key);
+						}
+					}
+				} while (++p != end);
+			}
+		}
+	} else if (EXPECTED(!(ht->u.flags & HASH_FLAG_INITIALIZED))) {
+		return;
+	}
+	pefree(ht->arData, ht->u.flags & HASH_FLAG_PERSISTENT);		/* 释放arData的内存 */
+}
+```
+
+其实 **zend_hash_destroy** 和 **zend_hash_clean** 的实现很相近，释放元素的过程几乎一样，唯一的区别就是最后的工作，**zend_hash_destroy** 最后是将 **arData** 彻底释放了。
+
+## 结尾
+
+**HashTable**在PHP的内核中的地位非常重要，数组、作用域等都是靠**HashTable**来实现的，PHP数组设计的操作肯定不止这点，更多的操作还包括排序、rehash等。不过这些都是最普遍的增删改查。更多的实现请自行阅读PHP源码 [*zend_hash.c*](https://github.com/php/php-src/blob/master/Zend/zend_hash.c)         [*zend_hash.h*](https://github.com/php/php-src/blob/master/Zend/zend_hash.h) 
