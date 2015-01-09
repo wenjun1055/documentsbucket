@@ -272,7 +272,7 @@ static zend_always_inline void _zend_hash_del_el_ex(HashTable *ht, uint32_t idx,
 }
 ```
 
-有一个注意的就是上面出现了一个宏 **HASH_FLAG_PACKED** 。根据鸟个原话的解释：
+有一个注意的就是上面出现了一个宏 **HASH_FLAG_PACKED** 。根据鸟哥原话的解释：
 > 表示一个自然key序的数组，就是可以随机访问的数组，就好比是C语言的数
 > 
 > array(1,2,3,4)，那么$arr[2]就是ht->arData[2]
