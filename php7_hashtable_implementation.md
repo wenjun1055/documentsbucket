@@ -391,6 +391,73 @@ ZEND_API void zend_hash_destroy(HashTable *ht)
 
 其实 **zend_hash_destroy** 和 **zend_hash_clean** 的实现很相近，释放元素的过程几乎一样，唯一的区别就是最后的工作，**zend_hash_destroy** 最后是将 **arData** 彻底释放了。
 
+### Rehash
+---
+
+当申请的 hashtable 容量满了后就需要扩容了，扩容涉及hash表的hash对应关系的重新关联。在这里叫做rehash，使用的函数是 **zend_hash_rehash**。函数代码实现如下：
+
+```
+ZEND_API int zend_hash_rehash(HashTable *ht)
+{
+	Bucket *p;
+	uint32_t nIndex, i, j;
+
+	IS_CONSISTENT(ht);
+
+	if (UNEXPECTED(ht->nNumOfElements == 0)) {		/* hashtable为空 */
+		if (ht->u.flags & HASH_FLAG_INITIALIZED) {		/* hashtable未初始化，直接充值arHash内存 */
+			memset(ht->arHash, INVALID_IDX, ht->nTableSize * sizeof(uint32_t));
+		}
+		return SUCCESS;
+	}
+
+	memset(ht->arHash, INVALID_IDX, ht->nTableSize * sizeof(uint32_t));	/* 重置arHash */
+	for (i = 0, j = 0; i < ht->nNumUsed; i++) {
+		p = ht->arData + i;
+		if (Z_TYPE(p->val) == IS_UNDEF) continue;
+		if (i != j) {	/* i不等于j表名arData中有UNDEF的元素存在 */
+			ht->arData[j] = ht->arData[i];	/* 将i的值挪到j的位置上，过滤掉空值元素 */
+			if (ht->nInternalPointer == i) {
+				ht->nInternalPointer = j;
+			}
+		}
+		nIndex = ht->arData[j].h & ht->nTableMask;	/* 重新计算位于arHash的位置 */
+		Z_NEXT(ht->arData[j].val) = ht->arHash[nIndex];
+		ht->arHash[nIndex] = j;
+		j++;
+	}
+	ht->nNumUsed = j;
+	return SUCCESS;
+}
+```
+
+上面的操作总结来说，用新的arHash的大小重置arHash的内存，然后遍历arData中的元素，挨个重新计算hash值，然后再计算它对应的新的arHash中的位置，并重新组建arData于arHash的对应关系。这里应该和另外一个函数接连起来看就更清楚明白了。
+
+```
+static void zend_hash_do_resize(HashTable *ht)
+{
+
+	IS_CONSISTENT(ht);
+
+	if (ht->nNumUsed > ht->nNumOfElements) {
+		HANDLE_BLOCK_INTERRUPTIONS();
+		zend_hash_rehash(ht);
+		HANDLE_UNBLOCK_INTERRUPTIONS();
+	} else if ((ht->nTableSize << 1) > 0) {	/* Let's double the table size */
+		HANDLE_BLOCK_INTERRUPTIONS();
+		ht->arData = (Bucket *) safe_perealloc(ht->arData, (ht->nTableSize << 1), sizeof(Bucket) + sizeof(uint32_t), 0, ht->u.flags & HASH_FLAG_PERSISTENT);
+		ht->arHash = (uint32_t*)(ht->arData + (ht->nTableSize << 1));
+		ht->nTableSize = (ht->nTableSize << 1);
+		ht->nTableMask = ht->nTableSize - 1;
+		zend_hash_rehash(ht);
+		HANDLE_UNBLOCK_INTERRUPTIONS();
+	}
+}
+```
+
+这个函数很明白的说明了hash表扩容的操作，最终还是调用的 **zend_hash_rehash** 来进行最后的hash关系的对应。
+
+
 ## 结尾
 
 **HashTable**在PHP的内核中的地位非常重要，数组、作用域等都是靠**HashTable**来实现的，PHP数组设计的操作肯定不止这点，更多的操作还包括排序、rehash等。不过这些都是最普遍的增删改查。更多的实现请自行阅读PHP源码 [*zend_hash.c*](https://github.com/php/php-src/blob/master/Zend/zend_hash.c)         [*zend_hash.h*](https://github.com/php/php-src/blob/master/Zend/zend_hash.h) 
